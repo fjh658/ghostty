@@ -38,6 +38,32 @@ for smaller examples of using `libghostty` in C and Zig.
 
 For more details, see [About Ghostty](https://ghostty.org/docs/about).
 
+## Fork Changes
+
+This fork adds the following features on top of upstream Ghostty:
+
+### Unlimited Scrollback
+
+Set `scrollback-limit = unlimited` to remove the memory cap on scrollback history. Scrollback will grow as needed without pruning.
+
+```
+# ghostty config
+scrollback-limit = unlimited
+```
+
+All existing numeric values continue to work as before (e.g. `scrollback-limit = 10000000` for 10MB). `scrollback-limit = 0` still means "disable scrollback entirely."
+
+### Save Lines to Scrollback in Alternate Screen Mode
+
+Set `alternate-screen-scrollback = true` to preserve the output from full-screen applications (vim, less, htop, etc.) in the primary screen's scrollback buffer after they exit.
+
+```
+# ghostty config
+alternate-screen-scrollback = true
+```
+
+With this enabled, you can scroll up after exiting vim or less to see what was on screen. Without it (the default), alternate screen content is discarded when the application exits.
+
 ## Download
 
 See the [download page](https://ghostty.org/download) on the Ghostty website.
