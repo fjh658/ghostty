@@ -3213,6 +3213,76 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     return next_node;
 }
 
+/// Insert rows from a source page iterator into this PageList's scrollback
+/// area (before the active area). The active area content is not affected.
+/// This is used to save alternate screen scrollback into the primary screen.
+///
+/// The source should be a PageIterator iterating over the rows to be
+/// inserted, from top to bottom (right_down direction).
+pub fn insertScrollbackRows(
+    self: *PageList,
+    source: anytype,
+) Allocator.Error!void {
+    // Find the node that contains the start of the active area.
+    const active_tl = self.getTopLeft(.active);
+    const insert_before = active_tl.node;
+
+    // We'll batch rows into pages. Create pages as needed and insert
+    // them before the active area.
+    var it = source;
+    while (it.next()) |chunk| {
+        const num_rows = chunk.end - chunk.start;
+        if (num_rows == 0) continue;
+
+        // Create a new page with enough capacity for these rows.
+        // createPage already updates self.page_size.
+        const node = try self.createPage(chunk.node.data.capacity);
+        node.data.size.rows = @intCast(num_rows);
+
+        // Clone the row data from the source page.
+        node.data.cloneFrom(
+            &chunk.node.data,
+            chunk.start,
+            chunk.end,
+        ) catch {
+            // If we run out of page capacity (styles, graphemes, etc.),
+            // skip this chunk. The page was already accounted for in
+            // page_size by createPage, so destroyNode will fix it.
+            self.destroyNode(node);
+            continue;
+        };
+
+        // Insert this page before the active area.
+        self.pages.insertBefore(insert_before, node);
+
+        // Update row accounting. page_size was already updated by createPage.
+        self.total_rows += num_rows;
+
+        // Prune oldest scrollback if we exceed max size.
+        while (self.pages.first != null and
+            self.pages.first != insert_before and
+            self.page_size > self.maxSize())
+        {
+            const first = self.pages.popFirst().?;
+            self.total_rows -= first.data.size.rows;
+
+            // Update any tracked pins that point to this page.
+            const pin_keys = self.tracked_pins.keys();
+            for (pin_keys) |p| {
+                if (p.node != first) continue;
+                p.node = self.pages.first.?;
+                p.y = 0;
+                p.x = 0;
+                p.garbage = true;
+            }
+            self.viewport_pin.garbage = false;
+
+            // destroyNode updates page_size.
+            self.destroyNode(first);
+        }
+    }
+}
+
 /// Possible dimensions to increase capacity for.
 pub const IncreaseCapacity = enum {
     styles,

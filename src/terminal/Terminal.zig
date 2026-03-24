@@ -28,6 +28,7 @@ const Stream = @import("stream_terminal.zig").Stream;
 
 const size = @import("size.zig");
 const pagepkg = @import("page.zig");
+const PageList = @import("PageList.zig");
 const style = @import("style.zig");
 const Screen = @import("Screen.zig");
 const ScreenSet = @import("ScreenSet.zig");
@@ -44,6 +45,10 @@ const TABSTOP_INTERVAL = 8;
 
 /// The set of screens behind this terminal (e.g. primary vs alternate).
 screens: ScreenSet,
+
+/// If true, lines scrolled off the top in alternate screen mode
+/// are saved to the primary screen's scrollback buffer.
+alternate_screen_scrollback: bool = false,
 
 /// Whether we're currently writing to the status line (DECSASD and DECSSDT).
 /// We don't support a status line currently so we just black hole this
@@ -187,8 +192,13 @@ pub const ScrollingRegion = struct {
 pub const Options = struct {
     cols: size.CellCountInt,
     rows: size.CellCountInt,
-    max_scrollback: usize = 10_000,
+    /// null = unlimited, 0 = no scrollback, N = N bytes limit.
+    max_scrollback: ?usize = 10_000,
     colors: Colors = .default,
+
+    /// If true, lines scrolled off the top in alternate screen mode
+    /// are saved to the primary screen's scrollback buffer.
+    alternate_screen_scrollback: bool = false,
 
     /// The default mode state. When the terminal gets a reset, it
     /// will revert back to this state.
@@ -214,6 +224,7 @@ pub fn init(
         .cols = cols,
         .rows = rows,
         .screens = screen_set,
+        .alternate_screen_scrollback = opts.alternate_screen_scrollback,
         .tabstops = try .init(alloc, cols, TABSTOP_INTERVAL),
         .scrolling_region = .{
             .top = 0,
@@ -2934,7 +2945,10 @@ pub fn switchScreen(self: *Terminal, key: ScreenSet.Key) !?*Screen {
                 .rows = self.rows,
                 .max_scrollback = switch (key) {
                     .primary => primary.pages.explicit_max_size,
-                    .alternate => 0,
+                    .alternate => if (self.alternate_screen_scrollback)
+                        primary.pages.explicit_max_size
+                    else
+                        0,
                 },
 
                 // Inherit our Kitty image storage limit from the primary
@@ -3004,6 +3018,31 @@ pub fn switchScreenMode(
         // 1049 unconditionally saves the cursor on enabling, even
         // if we're already on the alternate screen.
         .@"1049" => if (enabled) self.saveCursor(),
+    }
+
+    // If we're switching from alternate to primary and alternate screen
+    // scrollback is enabled, save the alt screen's content (scrollback +
+    // active area) into primary's scrollback before switching.
+    if (!enabled and self.alternate_screen_scrollback and
+        self.screens.active_key == .alternate)
+    {
+        if (self.screens.get(.primary)) |primary| {
+            const alt = self.screens.active;
+            if (alt.pages.pages.first) |first_node| {
+                // Iterate all pages in the alt screen from first to last.
+                const tl: PageList.Pin = .{ .node = first_node };
+                // Find the bottom-right pin (last row of last page).
+                const last_node = alt.pages.pages.last.?;
+                const bl: PageList.Pin = .{
+                    .node = last_node,
+                    .y = last_node.data.size.rows -| 1,
+                };
+                var page_it = tl.pageIterator(.right_down, bl);
+                primary.pages.insertScrollbackRows(&page_it) catch |err| {
+                    log.warn("failed to save alt screen scrollback err={}", .{err});
+                };
+            }
+        }
     }
 
     // Switch screens first to whatever we're going to.
@@ -13082,4 +13121,131 @@ test "Terminal: deleteLines wide char at right margin with full clear" {
     // and the orphaned spacer_tail at col 39 triggers a page integrity
     // violation in clearCells.
     try t.scrollUp(t.rows);
+}
+
+test "Terminal: unlimited scrollback" {
+    const alloc = testing.allocator;
+    // max_scrollback = null means unlimited
+    var t = try init(alloc, .{ .rows = 3, .cols = 5, .max_scrollback = null });
+    defer t.deinit(alloc);
+
+    // Write more lines than the screen can hold to create scrollback
+    try t.printString("AAA\n");
+    try t.printString("BBB\n");
+    try t.printString("CCC\n");
+    try t.printString("DDD\n");
+    try t.printString("EEE");
+
+    // Active area should show the last 3 lines
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("CCC\nDDD\nEEE", str);
+    }
+
+    // Full screen (scrollback + active) should have all 5 lines
+    {
+        const str = try t.screens.active.dumpStringAlloc(
+            testing.allocator,
+            .{ .screen = .{} },
+        );
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("AAA\nBBB\nCCC\nDDD\nEEE", str);
+    }
+}
+
+test "Terminal: alternate screen scrollback saves to primary" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{
+        .rows = 3,
+        .cols = 5,
+        .max_scrollback = 1024,
+        .alternate_screen_scrollback = true,
+    });
+    defer t.deinit(alloc);
+
+    // Write some content on primary screen
+    try t.printString("PRI");
+
+    // Enter alternate screen (mode 1049)
+    try t.switchScreenMode(.@"1049", true);
+    try testing.expectEqual(.alternate, t.screens.active_key);
+
+    // Write content on alt screen that causes scrolling.
+    // With 3 rows, writing 5 lines will scroll 2 lines into scrollback.
+    try t.printString("AA\n");
+    try t.printString("BB\n");
+    try t.printString("CC\n");
+    try t.printString("DD\n");
+    try t.printString("EE");
+
+    // Alt screen's active area should show last 3 lines
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("CC\nDD\nEE", str);
+    }
+
+    // Exit alternate screen
+    try t.switchScreenMode(.@"1049", false);
+    try testing.expectEqual(.primary, t.screens.active_key);
+
+    // Primary active area should have original content
+    {
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("PRI", str);
+    }
+
+    // Primary scrollback should now contain the alt screen's content.
+    // Check full screen (scrollback + active).
+    {
+        const str = try t.screens.active.dumpStringAlloc(
+            testing.allocator,
+            .{ .screen = .{} },
+        );
+        defer testing.allocator.free(str);
+        // Should contain alt screen content (scrollback + active) before primary active
+        try testing.expect(std.mem.indexOf(u8, str, "AA") != null);
+        try testing.expect(std.mem.indexOf(u8, str, "EE") != null);
+        try testing.expect(std.mem.indexOf(u8, str, "PRI") != null);
+    }
+}
+
+test "Terminal: alternate screen scrollback disabled by default" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{
+        .rows = 3,
+        .cols = 5,
+        .max_scrollback = 1024,
+        // alternate_screen_scrollback defaults to false
+    });
+    defer t.deinit(alloc);
+
+    try t.printString("PRI");
+
+    // Enter alternate screen
+    try t.switchScreenMode(.@"1049", true);
+
+    // Write lots of content
+    try t.printString("AA\n");
+    try t.printString("BB\n");
+    try t.printString("CC\n");
+    try t.printString("DD\n");
+    try t.printString("EE");
+
+    // Exit alternate screen
+    try t.switchScreenMode(.@"1049", false);
+
+    // Primary scrollback should NOT contain alt screen content
+    {
+        const str = try t.screens.active.dumpStringAlloc(
+            testing.allocator,
+            .{ .screen = .{} },
+        );
+        defer testing.allocator.free(str);
+        // Should only have primary content
+        try testing.expect(std.mem.indexOf(u8, str, "AA") == null);
+        try testing.expectEqualStrings("PRI", str);
+    }
 }

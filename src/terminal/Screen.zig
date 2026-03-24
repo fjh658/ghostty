@@ -249,9 +249,10 @@ pub const Options = struct {
     cols: size.CellCountInt,
     rows: size.CellCountInt,
 
-    /// The maximum size of scrollback in bytes. Zero means unlimited. Any
-    /// other value will be clamped to support a minimum of the active area.
-    max_scrollback: usize = 0,
+    /// The maximum size of scrollback in bytes. `null` means unlimited.
+    /// Zero means no scrollback at all. Any other value will be clamped
+    /// to support a minimum of the active area.
+    max_scrollback: ?usize = 0,
 
     /// The total storage limit for Kitty images in bytes for this
     /// screen. Kitty image storage is per-screen.
@@ -274,11 +275,15 @@ pub const Options = struct {
 /// size is that anyways.
 ///
 /// If max scrollback is 0, then no scrollback is kept at all.
+/// If max scrollback is null, scrollback is unlimited.
 pub fn init(
     alloc: Allocator,
     opts: Options,
 ) Allocator.Error!Screen {
     // Initialize our backing pages.
+    // max_scrollback: null = unlimited (PageList gets null → maxInt),
+    //                 0 = no scrollback (PageList gets 0),
+    //                 N = N bytes limit.
     var pages = try PageList.init(
         alloc,
         opts.cols,
@@ -295,7 +300,7 @@ pub fn init(
     var result: Screen = .{
         .alloc = alloc,
         .pages = pages,
-        .no_scrollback = opts.max_scrollback == 0,
+        .no_scrollback = if (opts.max_scrollback) |v| v == 0 else false,
         .cursor = .{
             .x = 0,
             .y = 0,

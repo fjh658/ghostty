@@ -1380,11 +1380,22 @@ input: RepeatableReadableIO = .{},
 ///
 /// This size is per terminal surface, not for the entire application.
 ///
-/// It is not currently possible to set an unlimited scrollback buffer.
-/// This is a future planned feature.
+/// Set to `unlimited` to allow infinite scrollback. This will consume as
+/// much memory as needed to store all scrollback history. Use with caution.
 ///
 /// This can be changed at runtime but will only affect new terminal surfaces.
-@"scrollback-limit": usize = 10_000_000, // 10MB
+@"scrollback-limit": ScrollbackLimit = .{ .limit = 10_000_000 }, // 10MB
+
+/// If `true`, lines that scroll off the top of the screen in alternate
+/// screen mode (used by applications such as `vim`, `less`, `htop`, etc.)
+/// are saved into the scrollback buffer of the primary screen.
+///
+/// This allows you to scroll back and see the output from full-screen
+/// applications after they exit. Without this option, alternate screen
+/// content is discarded when the application exits.
+///
+/// Default is `false`, matching traditional terminal behavior.
+@"alternate-screen-scrollback": bool = false,
 
 /// Control when the scrollbar is shown to scroll the scrollback buffer.
 ///
@@ -9894,6 +9905,43 @@ pub const Theme = struct {
         try testing.expectError(error.ValueRequired, v.parseCLI(alloc, ""));
         try testing.expectError(error.InvalidValue, v.parseCLI(alloc, "light:foo"));
         try testing.expectError(error.InvalidValue, v.parseCLI(alloc, "dark:foo"));
+    }
+};
+
+/// Represents a scrollback limit that can be either a byte size or unlimited.
+pub const ScrollbackLimit = struct {
+    /// The limit in bytes. null means unlimited.
+    limit: ?usize = null,
+
+    pub fn clone(self: *const ScrollbackLimit, _: Allocator) error{}!ScrollbackLimit {
+        return .{ .limit = self.limit };
+    }
+
+    pub fn equal(self: ScrollbackLimit, other: ScrollbackLimit) bool {
+        return self.limit == other.limit;
+    }
+
+    pub fn parseCLI(input: ?[]const u8) !ScrollbackLimit {
+        const value = input orelse return error.ValueRequired;
+        if (std.mem.eql(u8, value, "unlimited") or std.mem.eql(u8, value, "none")) {
+            return .{ .limit = null };
+        }
+        const num = std.fmt.parseInt(usize, value, 0) catch return error.InvalidValue;
+        return .{ .limit = num };
+    }
+
+    pub fn formatEntry(self: ScrollbackLimit, formatter: formatterpkg.EntryFormatter) !void {
+        if (self.limit) |limit| {
+            try formatter.formatEntry(usize, limit);
+        } else {
+            try formatter.formatEntry([]const u8, "unlimited");
+        }
+    }
+
+    /// Return the value to pass to Terminal.Options.max_scrollback.
+    /// null = unlimited, 0 = no scrollback, N = N bytes.
+    pub fn toTerminalMaxScrollback(self: ScrollbackLimit) ?usize {
+        return self.limit;
     }
 };
 
