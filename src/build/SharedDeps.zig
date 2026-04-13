@@ -133,7 +133,25 @@ pub fn add(
     step.root_module.addOptions("build_options", self.options);
 
     // Every exe needs the terminal options
-    self.config.terminalOptions().add(b, step.root_module);
+    self.config.terminalOptions(.ghostty).add(b, step.root_module);
+
+    // C imports for locale constants and functions
+    {
+        const c = b.addTranslateC(.{
+            .root_source_file = b.path("src/os/locale.c"),
+            .target = target,
+            .optimize = optimize,
+        });
+        if (target.result.os.tag.isDarwin()) {
+            const libc = try std.zig.LibCInstallation.findNative(.{
+                .allocator = b.allocator,
+                .target = &target.result,
+                .verbose = false,
+            });
+            c.addSystemIncludePath(.{ .cwd_relative = libc.sys_include_dir.? });
+        }
+        step.root_module.addImport("locale-c", c.createModule());
+    }
 
     // C imports needed to manage/create PTYs
     switch (target.result.os.tag) {
@@ -735,6 +753,7 @@ pub fn addSimd(
 ) !void {
     const target = m.resolved_target.?;
     const optimize = m.optimize.?;
+    const system_highway = b.systemIntegrationOption("highway", .{ .default = false });
 
     // Simdutf
     if (b.systemIntegrationOption("simdutf", .{})) {
@@ -753,7 +772,7 @@ pub fn addSimd(
     }
 
     // Highway
-    if (b.systemIntegrationOption("highway", .{ .default = false })) {
+    if (system_highway) {
         m.linkSystemLibrary("libhwy", dynamic_link_opts);
     } else {
         if (b.lazyDependency("highway", .{
@@ -810,6 +829,14 @@ pub fn addSimd(
         try flags.append(
             b.allocator,
             "-std=c++17",
+        );
+
+        // Keep our SIMD sources in the same Highway header mode as the
+        // vendored package build so HWY's inline dispatch/runtime helpers
+        // have a consistent ABI.
+        if (!system_highway) try flags.append(
+            b.allocator,
+            "-DHWY_NO_LIBCXX",
         );
 
         // Disable ubsan for MSVC to avoid undefined references to
